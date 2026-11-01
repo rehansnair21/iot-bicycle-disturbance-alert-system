@@ -1,0 +1,688 @@
+
+#include <WiFi.h>
+#include <WebServer.h>
+
+// ======================================
+// ESP32 WI-FI HOTSPOT
+// ======================================
+const char* AP_SSID = "Bicycle_Security";
+const char* AP_PASSWORD = "BikeSecure123";
+
+IPAddress localIP(192, 168, 4, 1);
+IPAddress gateway(192, 168, 4, 1);
+IPAddress subnet(255, 255, 255, 0);
+
+// ======================================
+// SENSOR CONFIGURATION
+// ======================================
+const int vibrationPin = 27;
+const int ACTIVE_STATE = LOW;
+
+const unsigned long alertCooldown = 2000;
+
+// ======================================
+// WEB SERVER
+// ======================================
+WebServer server(80);
+
+// ======================================
+// SYSTEM VARIABLES
+// ======================================
+bool securityArmed = false;
+bool vibrationDetected = false;
+
+unsigned long alertCount = 0;
+unsigned long lastAlertTime = 0;
+
+// ======================================
+// WEB DASHBOARD
+// ======================================
+const char dashboard[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<title>Bicycle Security Dashboard</title>
+
+<style>
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    padding: 20px;
+    font-family: Arial, sans-serif;
+    background: #101827;
+    color: white;
+}
+
+.container {
+    max-width: 850px;
+    margin: auto;
+}
+
+h1 {
+    text-align: center;
+    color: #38bdf8;
+}
+
+.subtitle {
+    text-align: center;
+    color: #cbd5e1;
+}
+
+.card {
+    background: #1e293b;
+    padding: 20px;
+    margin: 18px 0;
+    border-radius: 12px;
+}
+
+.status {
+    font-size: 19px;
+    font-weight: bold;
+}
+
+.green {
+    color: #4ade80;
+}
+
+.red {
+    color: #f87171;
+}
+
+button {
+    padding: 13px 18px;
+    border: none;
+    border-radius: 8px;
+    margin: 5px;
+    cursor: pointer;
+    font-weight: bold;
+}
+
+.arm {
+    background: #22c55e;
+    color: #052e16;
+}
+
+.disarm {
+    background: #ef4444;
+    color: white;
+}
+
+.sound {
+    background: #38bdf8;
+    color: #082f49;
+}
+
+.test {
+    background: #facc15;
+    color: #422006;
+}
+
+.stat {
+    font-size: 42px;
+    color: #38bdf8;
+    font-weight: bold;
+    margin-top: 12px;
+}
+
+/* Warning is hidden when there is no disturbance */
+.alert-box {
+    display: none;
+    padding: 15px;
+    border-radius: 8px;
+    margin-top: 12px;
+}
+
+.warning {
+    display: block;
+    background: #7f1d1d;
+    color: white;
+    animation: blink 0.8s infinite alternate;
+}
+
+@keyframes blink {
+    from { opacity: 1; }
+    to { opacity: 0.7; }
+}
+
+.small {
+    color: #cbd5e1;
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+li {
+    margin: 10px 0;
+    overflow-wrap: anywhere;
+}
+</style>
+</head>
+
+<body>
+
+<div class="container">
+
+<h1>🚲 Bicycle Security System</h1>
+
+<p class="subtitle">
+    ESP32 + SW-420 Vibration Sensor
+</p>
+
+<div class="card">
+
+    <h2>System Status</h2>
+
+    <p>
+        Dashboard connection:
+        <span id="connection" class="green">Connected</span>
+    </p>
+
+    <p>
+        Security:
+        <span id="securityStatus" class="status red">
+            DISARMED
+        </span>
+    </p>
+
+    <p>
+        Vibration sensor:
+        <span id="sensorStatus" class="status">
+            Waiting...
+        </span>
+    </p>
+
+    <button
+        id="toggleButton"
+        class="arm"
+        onclick="toggleSecurity()">
+        Arm Security
+    </button>
+
+</div>
+
+<div class="card">
+
+    <h2>🔊 Browser Sound Alert</h2>
+
+    <p class="small">
+        Enable sound before arming security. Keep this dashboard
+        open to hear alerts through your device speakers.
+    </p>
+
+    <button class="sound" onclick="enableSound()">
+        Enable Alert Sound
+    </button>
+
+    <button class="test" onclick="testSound()">
+        Test Sound
+    </button>
+
+    <p id="soundStatus" class="small">
+        Sound not enabled.
+    </p>
+
+</div>
+
+<div class="card">
+
+    <h2>📊 Alert Statistics</h2>
+
+    <p>Total Disturbance Alerts</p>
+
+    <div id="alertCount" class="stat">0</div>
+
+    <!-- Only visible when a disturbance is detected -->
+    <div id="alertBox" class="alert-box">
+        ⚠ WARNING: Bicycle disturbance detected!
+    </div>
+
+    <p class="small">
+        Last alert:
+        <span id="lastAlert">None</span>
+    </p>
+
+</div>
+
+<div class="card">
+
+    <h2>📜 Recent Alert History</h2>
+
+    <ul id="history">
+        <li>No alerts recorded yet.</li>
+    </ul>
+
+</div>
+
+<div class="card">
+
+    <h2>How to Use</h2>
+
+    <ol>
+        <li>Connect your device to Bicycle_Security Wi-Fi.</li>
+        <li>Open http://192.168.4.1</li>
+        <li>Click Enable Alert Sound.</li>
+        <li>Click Test Sound to check the speakers.</li>
+        <li>Click Arm Security.</li>
+        <li>Move the sensor gently to test detection.</li>
+    </ol>
+
+    <p class="small">
+        Internet access and a physical buzzer are not required.
+    </p>
+
+</div>
+
+</div>
+
+<script>
+let audioContext = null;
+let soundEnabled = false;
+
+let previousCount = null;
+let historyItems = [];
+
+function playSound() {
+    if (!soundEnabled || !audioContext) {
+        return;
+    }
+
+    if (audioContext.state === "suspended") {
+        audioContext.resume();
+    }
+
+    const oscillator = audioContext.createOscillator();
+    const gain = audioContext.createGain();
+
+    oscillator.type = "square";
+
+    oscillator.frequency.setValueAtTime(
+        1000,
+        audioContext.currentTime
+    );
+
+    gain.gain.setValueAtTime(
+        0.2,
+        audioContext.currentTime
+    );
+
+    gain.gain.setValueAtTime(
+        0.2,
+        audioContext.currentTime + 0.25
+    );
+
+    gain.gain.setValueAtTime(
+        0,
+        audioContext.currentTime + 0.4
+    );
+
+    oscillator.connect(gain);
+    gain.connect(audioContext.destination);
+
+    oscillator.start();
+    oscillator.stop(audioContext.currentTime + 0.4);
+}
+
+async function enableSound() {
+    try {
+        const AudioClass =
+            window.AudioContext || window.webkitAudioContext;
+
+        if (!AudioClass) {
+            alert("Your browser does not support audio.");
+            return;
+        }
+
+        if (!audioContext) {
+            audioContext = new AudioClass();
+        }
+
+        await audioContext.resume();
+
+        soundEnabled = true;
+
+        document.getElementById("soundStatus").textContent =
+            "Alert sound enabled.";
+
+        playSound();
+
+    } catch (error) {
+        document.getElementById("soundStatus").textContent =
+            "Unable to enable sound.";
+    }
+}
+
+async function testSound() {
+    if (!soundEnabled) {
+        await enableSound();
+    } else {
+        playSound();
+    }
+}
+
+async function toggleSecurity() {
+    try {
+        const response = await fetch("/api/toggle", {
+            method: "POST",
+            cache: "no-store"
+        });
+
+        if (!response.ok) {
+            throw new Error("Toggle failed");
+        }
+
+        await updateDashboard();
+
+    } catch (error) {
+        alert("Cannot communicate with the ESP32.");
+    }
+}
+
+function renderHistory() {
+    const list = document.getElementById("history");
+
+    list.innerHTML = "";
+
+    if (historyItems.length === 0) {
+        list.innerHTML = "<li>No alerts recorded yet.</li>";
+        return;
+    }
+
+    historyItems.forEach(function(item) {
+        const li = document.createElement("li");
+
+        li.textContent = item.time + " - " + item.message;
+
+        list.appendChild(li);
+    });
+}
+
+async function updateDashboard() {
+    try {
+        const response = await fetch("/api/status", {
+            cache: "no-store"
+        });
+
+        if (!response.ok) {
+            throw new Error("Status request failed");
+        }
+
+        const data = await response.json();
+
+        document.getElementById("connection").textContent =
+            "Connected";
+
+        document.getElementById("connection").className =
+            "green";
+
+        // Update security status
+        const security =
+            document.getElementById("securityStatus");
+
+        const toggle =
+            document.getElementById("toggleButton");
+
+        if (data.armed) {
+            security.textContent = "ARMED";
+            security.className = "status green";
+
+            toggle.textContent = "Disarm Security";
+            toggle.className = "disarm";
+
+        } else {
+            security.textContent = "DISARMED";
+            security.className = "status red";
+
+            toggle.textContent = "Arm Security";
+            toggle.className = "arm";
+        }
+
+        // Update vibration status
+        const sensor =
+            document.getElementById("sensorStatus");
+
+        if (data.vibration) {
+            sensor.textContent = "VIBRATION DETECTED";
+            sensor.className = "status red";
+        } else {
+            sensor.textContent = "No vibration";
+            sensor.className = "status green";
+        }
+
+        // Update alert statistics
+        document.getElementById("alertCount").textContent =
+            data.alertCount;
+
+        document.getElementById("lastAlert").textContent =
+            data.lastAlert;
+
+        // Show warning only when armed and vibration is detected
+        const alertBox =
+            document.getElementById("alertBox");
+
+        if (data.armed && data.vibration) {
+            alertBox.textContent =
+                "⚠ WARNING: Bicycle disturbance detected!";
+
+            alertBox.className = "alert-box warning";
+        } else {
+            alertBox.className = "alert-box";
+        }
+
+        // Detect newly registered alerts
+        if (previousCount === null) {
+            previousCount = data.alertCount;
+
+        } else if (data.alertCount > previousCount) {
+            const difference = Math.min(
+                data.alertCount - previousCount,
+                20
+            );
+
+            for (let i = 0; i < difference; i++) {
+                historyItems.unshift({
+                    time: new Date().toLocaleTimeString(),
+                    message: "Bicycle disturbance detected"
+                });
+            }
+
+            historyItems = historyItems.slice(0, 10);
+
+            renderHistory();
+
+            playSound();
+
+            previousCount = data.alertCount;
+        }
+
+    } catch (error) {
+        document.getElementById("connection").textContent =
+            "Disconnected";
+
+        document.getElementById("connection").className =
+            "red";
+    }
+}
+
+updateDashboard();
+
+setInterval(updateDashboard, 500);
+</script>
+
+</body>
+</html>
+)rawliteral";
+
+// ======================================
+// CHECK VIBRATION SENSOR
+// ======================================
+void checkVibration() {
+    vibrationDetected =
+        (digitalRead(vibrationPin) == ACTIVE_STATE);
+
+    if (securityArmed && vibrationDetected) {
+        unsigned long now = millis();
+
+        if (now - lastAlertTime >= alertCooldown) {
+            alertCount++;
+            lastAlertTime = now;
+
+            Serial.println(
+                "WARNING: Bicycle disturbance detected!"
+            );
+
+            Serial.print("Total alerts: ");
+            Serial.println(alertCount);
+        }
+    }
+}
+
+// ======================================
+// STATUS API
+// ======================================
+void handleStatus() {
+    String json = "{";
+
+    json += "\"armed\":";
+    json += securityArmed ? "true" : "false";
+
+    json += ",\"vibration\":";
+    json += vibrationDetected ? "true" : "false";
+
+    json += ",\"alertCount\":";
+    json += String(alertCount);
+
+    json += ",\"lastAlert\":\"";
+
+    if (alertCount == 0) {
+        json += "None";
+    } else {
+        json += String(
+            (millis() - lastAlertTime) / 1000
+        );
+
+        json += " seconds ago";
+    }
+
+    json += "\"}";
+
+    server.sendHeader("Cache-Control", "no-store");
+
+    server.send(
+        200,
+        "application/json",
+        json
+    );
+}
+
+// ======================================
+// TOGGLE SECURITY
+// ======================================
+void handleToggle() {
+    securityArmed = !securityArmed;
+
+    Serial.print("Security status: ");
+
+    Serial.println(
+        securityArmed ? "ARMED" : "DISARMED"
+    );
+
+    server.send(
+        200,
+        "application/json",
+        securityArmed
+            ? "{\"armed\":true}"
+            : "{\"armed\":false}"
+    );
+}
+
+// ======================================
+// SETUP
+// ======================================
+void setup() {
+    Serial.begin(115200);
+
+    delay(1000);
+
+    pinMode(vibrationPin, INPUT);
+
+    Serial.println();
+    Serial.println("================================");
+    Serial.println("IoT Bicycle Disturbance System");
+    Serial.println("Starting Wi-Fi hotspot...");
+    Serial.println("================================");
+
+    WiFi.mode(WIFI_AP);
+    WiFi.setSleep(false);
+
+    WiFi.softAPConfig(
+        localIP,
+        gateway,
+        subnet
+    );
+
+    bool result = WiFi.softAP(
+        AP_SSID,
+        AP_PASSWORD,
+        6,
+        false,
+        4
+    );
+
+    if (result) {
+        Serial.println("Wi-Fi hotspot started!");
+
+        Serial.print("Wi-Fi Name: ");
+        Serial.println(AP_SSID);
+
+        Serial.print("Wi-Fi Password: ");
+        Serial.println(AP_PASSWORD);
+
+        Serial.print("Dashboard IP: http://");
+        Serial.println(WiFi.softAPIP());
+
+    } else {
+        Serial.println("ERROR: Wi-Fi hotspot failed!");
+    }
+
+    server.on("/", HTTP_GET, []() {
+        server.send_P(
+            200,
+            "text/html",
+            dashboard
+        );
+    });
+
+    server.on(
+        "/api/status",
+        HTTP_GET,
+        handleStatus
+    );
+
+    server.on(
+        "/api/toggle",
+        HTTP_POST,
+        handleToggle
+    );
+
+    server.begin();
+
+    Serial.println("Web server started!");
+    Serial.println("Open http://192.168.4.1");
+}
+
+// ======================================
+// MAIN LOOP
+// ======================================
+void loop() {
+    server.handleClient();
+
+    checkVibration();
+
+    delay(10);
+}
